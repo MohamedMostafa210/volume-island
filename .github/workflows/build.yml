@@ -1,0 +1,51 @@
+name: Build IPA
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick newest Xcode
+        run: |
+          echo "Installed Xcodes:"
+          ls -d /Applications/Xcode*.app
+          NEWEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Using $NEWEST"
+          sudo xcode-select -s "$NEWEST/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i "iOS"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Archive (unsigned)
+        run: |
+          xcodebuild archive \
+            -project VolumeIsland.xcodeproj \
+            -scheme VolumeIsland \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/VolumeIsland.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/VolumeIsland.xcarchive/Products/Applications/VolumeIsland.app Payload/
+          zip -r -y VolumeIsland.ipa Payload
+          ls -lh VolumeIsland.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VolumeIsland-ipa
+          path: VolumeIsland.ipa

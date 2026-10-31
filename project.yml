@@ -1,0 +1,46 @@
+name: VolumeIsland
+options:
+  bundleIdPrefix: com.momo
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  VolumeIsland:
+    type: application
+    platform: iOS
+    sources:
+      - VolumeIsland
+      - Shared
+    info:
+      path: VolumeIsland/Info.plist
+      properties:
+        CFBundleDisplayName: VolumeIsland
+        NSSupportsLiveActivities: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.momo.volumeisland
+    dependencies:
+      - target: VolumeIslandWidget
+  VolumeIslandWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - VolumeIslandWidget
+      - Shared
+    info:
+      path: VolumeIslandWidget/Info.plist
+      properties:
+        CFBundleDisplayName: VolumeIsland
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.momo.volumeisland.widget
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WIDGET_EXTENSION"
