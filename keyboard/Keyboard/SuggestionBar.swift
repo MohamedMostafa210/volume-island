@@ -1,6 +1,7 @@
 import UIKit
 
-/// Top bar: clipboard button + three prediction slots (best one in the middle).
+/// Top bar: small clipboard button + three prediction slots (best one in the middle),
+/// styled like Apple's: plain words, thin dividers between the slots.
 final class SuggestionBar: UIView {
     struct Item {
         enum Kind {
@@ -21,11 +22,12 @@ final class SuggestionBar: UIView {
     private var dividers: [UIView] = []
     private var items: [Item?] = [nil, nil, nil]
     private var theme: Theme = .light
-    private let clipWidth: CGFloat = 40
+    private let clipWidth: CGFloat = 34
+    private let font = UIFont.systemFont(ofSize: 18, weight: .regular)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        let config = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+        let config = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
         clipButton.setImage(UIImage(systemName: "doc.on.clipboard", withConfiguration: config), for: .normal)
         clipButton.addTarget(self, action: #selector(clipTapped), for: .touchUpInside)
         addSubview(clipButton)
@@ -33,13 +35,14 @@ final class SuggestionBar: UIView {
         for index in 0..<3 {
             let button = UIButton(type: .custom)
             button.titleLabel?.lineBreakMode = .byTruncatingTail
+            button.titleLabel?.font = font
             button.titleEdgeInsets = UIEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
             button.tag = index
             button.addTarget(self, action: #selector(tapped(_:)), for: .touchUpInside)
             addSubview(button)
             buttons.append(button)
         }
-        for _ in 0..<3 {
+        for _ in 0..<2 {
             let divider = UIView()
             addSubview(divider)
             dividers.append(divider)
@@ -53,18 +56,25 @@ final class SuggestionBar: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         clipButton.frame = CGRect(x: 2, y: 0, width: clipWidth, height: bounds.height)
-        let width = (bounds.width - clipWidth - 4) / 3
+        let start = clipWidth + 2
+        let width = (bounds.width - start) / 3
         for (index, button) in buttons.enumerated() {
-            button.frame = CGRect(x: clipWidth + 2 + CGFloat(index) * width, y: 0, width: width, height: bounds.height)
+            button.frame = CGRect(x: start + CGFloat(index) * width, y: 0, width: width, height: bounds.height)
         }
+        // Apple: about 24 pt tall, centred, one hairline wide.
+        let hairline = 1 / max(traitCollection.displayScale, 1)
+        let lineHeight = min(24, bounds.height * 0.52)
         for (index, divider) in dividers.enumerated() {
-            divider.frame = CGRect(x: clipWidth + 2 + CGFloat(index) * width, y: bounds.height * 0.28, width: 1, height: bounds.height * 0.44)
+            divider.frame = CGRect(
+                x: start + CGFloat(index + 1) * width, y: (bounds.height - lineHeight) / 2,
+                width: hairline, height: lineHeight
+            )
         }
     }
 
     func apply(theme: Theme) {
         self.theme = theme
-        clipButton.tintColor = theme.text.withAlphaComponent(0.7)
+        clipButton.tintColor = theme.faintText
         dividers.forEach { $0.backgroundColor = theme.suggestionDivider }
         render()
     }
@@ -82,16 +92,9 @@ final class SuggestionBar: UIView {
         for (index, button) in buttons.enumerated() {
             let item = items[index]
             button.isEnabled = item != nil
-            let font: UIFont = index == 1
-                ? .systemFont(ofSize: 17, weight: .semibold)
-                : .systemFont(ofSize: 17, weight: .regular)
-            button.titleLabel?.font = font
-            button.setTitleColor(theme.text, for: .normal)
+            button.setTitleColor(theme.suggestionText, for: .normal)
             button.setTitle(item?.title, for: .normal)
         }
-        dividers[0].isHidden = false
-        dividers[1].isHidden = items[0] == nil || items[1] == nil
-        dividers[2].isHidden = items[1] == nil || items[2] == nil
     }
 
     @objc private func tapped(_ sender: UIButton) {

@@ -24,8 +24,11 @@ final class KeysArea: UIView {
     private(set) var keyViews: [KeyView] = []
     private var rows: [KeyRow] = []
     private var rowViews: [[KeyView]] = []
+    // Measured from Apple's keyboard: 6 pt gaps, keys start 6.7 pt from the screen edge,
+    // keys are 11 pt shorter than the row (43 pt keys in 54 pt rows).
     private let hGap: CGFloat = 6
-    private let sidePad: CGFloat = 3
+    private let sidePad: CGFloat = 11.0 / 3.0
+    private let vGap: CGFloat = 11
     /// Taps this far above the top row still count as the top row.
     private let topReach: CGFloat = 8
     /// How long to hold a letter before its symbol menu opens.
@@ -115,7 +118,7 @@ final class KeysArea: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let keyHeight = rowPitch - 10
+        let keyHeight = max(rowPitch - vGap, 10)
         let width = bounds.width - sidePad * 2
         for (r, row) in rows.enumerated() {
             let used = row.keys.reduce(CGFloat(0)) { $0 + $1.width }
@@ -126,7 +129,14 @@ final class KeysArea: UIView {
             let y = CGFloat(r) * rowPitch + (rowPitch - keyHeight) / 2
             for (i, spec) in row.keys.enumerated() {
                 let w = spec.width * unit
-                rowViews[r][i].frame = CGRect(x: x + hGap / 2, y: y, width: w - hGap, height: keyHeight)
+                let drawn = (spec.drawWidth ?? spec.width) * unit - hGap
+                let keyX: CGFloat
+                switch spec.align {
+                case .leading: keyX = x + hGap / 2
+                case .trailing: keyX = x + w - hGap / 2 - drawn
+                case .center: keyX = x + (w - drawn) / 2
+                }
+                rowViews[r][i].frame = CGRect(x: keyX, y: y, width: drawn, height: keyHeight)
                 x += w
             }
         }
@@ -136,7 +146,7 @@ final class KeysArea: UIView {
         var best: KeyView?
         var bestDistance = CGFloat.greatestFiniteMagnitude
         for key in keyViews {
-            let hitFrame = key.frame.insetBy(dx: -hGap / 2, dy: -5)
+            let hitFrame = key.frame.insetBy(dx: -hGap / 2, dy: -vGap / 2)
             if hitFrame.contains(point) { return key }
             let dx = max(key.frame.minX - point.x, 0, point.x - key.frame.maxX)
             let dy = max(key.frame.minY - point.y, 0, point.y - key.frame.maxY)

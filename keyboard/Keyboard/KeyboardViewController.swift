@@ -65,11 +65,19 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     // MARK: Metrics
 
     private var isLandscape: Bool { traitCollection.verticalSizeClass == .compact }
-    private var barHeight: CGFloat { isLandscape ? 32 : 38 }
-    private var rowPitch: CGFloat { isLandscape ? 38 : 52 }
+    // Portrait sizes measured from Apple's keyboard: 46 pt bar, 54 pt rows (43 pt keys).
+    private var barHeight: CGFloat { isLandscape ? 32 : 46 }
+    private var rowPitch: CGFloat { isLandscape ? 38 : 54 }
     private var totalHeight: CGFloat {
-        barHeight + rowPitch * CGFloat(Layouts.rowCount(showNumbers: showNumberRow)) + 2
+        barHeight + rowPitch * CGFloat(Layouts.rowCount(showNumbers: showNumberRow))
     }
+
+    /// SF Symbol names, with a fallback in case a name is missing on this iOS.
+    private static func symbol(_ preferred: String, or fallback: String) -> String {
+        UIImage(systemName: preferred) != nil ? preferred : fallback
+    }
+    private static let returnIcon = symbol("return.left", or: "arrow.turn.down.left")
+    private static let emojiIcon = symbol("face.smiling.inverse", or: "face.smiling")
 
     // MARK: Lifecycle
 
@@ -120,10 +128,20 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         ]
     }
 
-    private func install(_ panel: UIView) {
+    /// - fullHeight: cover the prediction bar too (Apple's emoji keyboard has no bar).
+    private func install(_ panel: UIView, fullHeight: Bool = false) {
         panel.translatesAutoresizingMaskIntoConstraints = false
         view.insertSubview(panel, aboveSubview: keysArea)
-        NSLayoutConstraint.activate(panelConstraints(panel))
+        if fullHeight {
+            NSLayoutConstraint.activate([
+                panel.topAnchor.constraint(equalTo: view.topAnchor),
+                panel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                panel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                panel.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            ])
+        } else {
+            NSLayoutConstraint.activate(panelConstraints(panel))
+        }
     }
 
     @discardableResult
@@ -142,7 +160,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             self?.feedback(.delete)
             self?.backspace()
         }
-        install(panel)
+        install(panel, fullHeight: true)
         emojiPanel = panel
         return panel
     }
@@ -376,7 +394,8 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         keysArea.theme = theme
         suggestionBar.apply(theme: theme)
 
-        if mode == .emoji { loadEmojiPanel() }
+        if mode == .emoji { loadEmojiPanel().prepareToShow() }
+        suggestionBar.isHidden = mode == .emoji && !showingSettings
         if mode == .clipboard { loadClipboardPanel() }
         emojiPanel?.apply(theme: theme)
         clipboardPanel?.apply(theme: theme)
@@ -411,7 +430,9 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         case .text(let text):
             key.configure(text: text, image: nil, special: false, accent: false, theme: theme, hint: key.spec.hint)
         case .space:
-            key.configure(text: Layouts.isArabic ? "مسافة" : "space", image: nil, special: false, accent: false, theme: theme)
+            // Apple: empty space bar with a small language letter in the corner.
+            key.configure(text: nil, image: nil, special: false, accent: false, theme: theme,
+                          marker: Layouts.isArabic ? "ع" : "A")
         case .shift:
             let image: String
             switch shift {
@@ -419,14 +440,18 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             case .once: image = "shift.fill"
             case .locked: image = "capslock.fill"
             }
-            key.configure(text: nil, image: image, special: shift == .off, accent: false, theme: theme)
+            key.configure(text: nil, image: image, special: true, accent: false, theme: theme, iconSize: 19)
         case .delete:
-            key.configure(text: nil, image: "delete.left", special: true, accent: false, theme: theme)
+            key.configure(text: nil, image: "delete.left", special: true, accent: false, theme: theme, iconSize: 17)
         case .globe:
             key.configure(text: nil, image: "globe", special: true, accent: false, theme: theme)
         case .returnKey:
             let info = returnInfo()
-            key.configure(text: info.title, image: nil, special: true, accent: info.blue, theme: theme)
+            if returnType == .default {
+                key.configure(text: nil, image: Self.returnIcon, special: true, accent: false, theme: theme, iconSize: 18)
+            } else {
+                key.configure(text: info.title, image: nil, special: true, accent: info.blue, theme: theme)
+            }
         case .mode(let target):
             switch target {
             case .letters, .clipboard:
@@ -436,7 +461,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             case .symbols2:
                 key.configure(text: "#+=", image: nil, special: true, accent: false, theme: theme)
             case .emoji:
-                key.configure(text: nil, image: "face.smiling", special: true, accent: false, theme: theme)
+                key.configure(text: nil, image: Self.emojiIcon, special: true, accent: false, theme: theme, iconSize: 20)
             }
         }
     }

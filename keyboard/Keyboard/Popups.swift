@@ -34,6 +34,7 @@ final class KeyPreviewView: UIView {
         label.textColor = theme.text
         backgroundColor = theme.letterKey
         layer.shadowColor = theme.shadow.cgColor
+        layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
         isHidden = false
     }
 
@@ -80,6 +81,7 @@ final class AlternatesView: UIView {
         frame = CGRect(x: x, y: key.minY - height + 4 - key.height * 0.15, width: width, height: height)
         backgroundColor = theme.letterKey
         layer.shadowColor = theme.shadow.cgColor
+        layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
 
         labels = options.enumerated().map { index, option in
             let label = UILabel(frame: CGRect(x: 4 + CGFloat(index) * cellWidth, y: 4, width: cellWidth, height: key.height))

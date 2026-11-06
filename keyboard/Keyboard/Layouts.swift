@@ -18,13 +18,21 @@ enum KeyAction: Equatable {
     case globe
 }
 
+enum KeyAlign {
+    case center, leading, trailing
+}
+
 struct KeySpec {
     var action: KeyAction
+    /// Space the key takes in the row (and its touch area), in key units.
     var width: CGFloat = 1
     /// Long-press options. The first one is typed if you long-press and let go.
     var alternates: [String] = []
     /// Small symbol shown in the key's corner (Gboard style).
     var hint: String? = nil
+    /// Drawn size, if smaller than `width` (Apple's shift and delete keys).
+    var drawWidth: CGFloat? = nil
+    var align: KeyAlign = .center
 }
 
 struct KeyRow {
@@ -154,9 +162,9 @@ enum Layouts {
             } else {
                 rows.append(KeyRow(keys: englishRow("q w e r t y u i o p", shifted: shifted, hints: hints)))
                 rows.append(KeyRow(keys: englishRow("a s d f g h j k l", shifted: shifted, hints: hints), units: 10))
-                var last = [KeySpec(action: .shift, width: 1.5)]
+                var last = [leftEdgeKey(.shift)]
                 last += englishRow("z x c v b n m", shifted: shifted, hints: hints)
-                last.append(KeySpec(action: .delete, width: 1.5))
+                last.append(rightDeleteKey)
                 rows.append(KeyRow(keys: last))
             }
         case .symbols, .symbols2:
@@ -180,14 +188,22 @@ enum Layouts {
                 rows.append(numberRow())
                 rows.append(symbolRow(punctuationRow))
             }
-            var last = [KeySpec(action: .mode(page2 ? .symbols : .symbols2), width: 1.5)]
+            var last = [leftEdgeKey(.mode(page2 ? .symbols : .symbols2))]
             last += split(punctuation).map { KeySpec(action: .text($0), width: 1.4) }
-            last.append(KeySpec(action: .delete, width: 1.5))
+            last.append(rightDeleteKey)
             rows.append(KeyRow(keys: last))
         }
         rows.append(bottomRow(mode: mode, showGlobe: showGlobe))
         return rows
     }
+
+    /// Apple's third-row edge keys: 1.5 units of touch area, drawn 1.3 units wide,
+    /// pushed to the edge with a wider gap towards the letters.
+    private static func leftEdgeKey(_ action: KeyAction) -> KeySpec {
+        KeySpec(action: action, width: 1.5, drawWidth: 1.3, align: .leading)
+    }
+
+    private static let rightDeleteKey = KeySpec(action: .delete, width: 1.5, drawWidth: 1.3, align: .trailing)
 
     private static func bottomRow(mode: KeyboardMode, showGlobe: Bool) -> KeyRow {
         var keys: [KeySpec] = []
