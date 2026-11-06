@@ -132,6 +132,7 @@ final class KeysArea: UIView {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
+            Perf.eventTime = touch.timestamp
             // Rollover: a new finger commits any letter still held down.
             let pending = states.values.filter { $0.mode == .normal && !$0.committed && $0.key.isCharacter }
             for state in pending {
@@ -149,6 +150,7 @@ final class KeysArea: UIView {
             let state = TouchState(key: key, x: point.x)
             states[ObjectIdentifier(touch)] = state
             press(state)
+            Perf.recordDown(eventTime: touch.timestamp)
         }
     }
 
@@ -266,6 +268,7 @@ final class KeysArea: UIView {
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
             guard let state = states.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
+            Perf.eventTime = touch.timestamp
             let action = state.key.spec.action
             let mode = state.mode
             let alreadyCommitted = state.committed

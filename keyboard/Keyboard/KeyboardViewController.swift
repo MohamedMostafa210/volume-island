@@ -2,6 +2,10 @@ import AudioToolbox
 import UIKit
 
 final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
+    // Must stay the first property: it stamps the moment the keyboard starts being built.
+    private let launchStamp = ProcessInfo.processInfo.systemUptime
+    private var reportedLaunch = false
+
     private let suggestionBar = SuggestionBar()
     private let keysArea = KeysArea()
     private let emojiPanel = EmojiPanel()
@@ -11,11 +15,33 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
 
     private enum ShiftState { case off, once, locked }
 
+    /// Everything that changes how the keys look. The keys are only redrawn when this changes.
+    private struct RenderState: Equatable {
+        let mode: KeyboardMode
+        let shift: ShiftState
+        let dark: Bool
+        let returnType: Int
+        let globe: Bool
+    }
+
     private var mode: KeyboardMode = .letters
     private var shift: ShiftState = .off
     private var lastShiftTap = Date.distantPast
     private var lastSpaceTap = Date.distantPast
     private var theme: Theme = .light
+    private var rendered: RenderState?
+
+    // Settings of the current text field, read only when the field changes.
+    private var appearanceDark = false
+    private var returnType: UIReturnKeyType = .default
+    private var keyboardTypeCached: UIKeyboardType = .default
+    private var autocap: UITextAutocapitalizationType = .sentences
+
+    // Our own copy of the text just before the cursor (nil = unknown, read it when needed).
+    private var ctx: String?
+    private var lastOwnEdit: TimeInterval = 0
+    private var resyncGeneration = 0
+    private var needsRefresh = false
 
     private let haptic = UIImpactFeedbackGenerator(style: .light)
     private let checker = UITextChecker()
@@ -34,6 +60,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        readTraits()
 
         for sub in [suggestionBar, keysArea, emojiPanel, clipboardPanel] as [UIView] {
             sub.translatesAutoresizingMaskIntoConstraints = false
@@ -70,10 +97,11 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             self.mode = self.mode == .clipboard ? .letters : .clipboard
             self.reload()
         }
+        suggestionBar.onSecret = { [weak self] in self?.toggleDebug() }
 
         emojiPanel.onPick = { [weak self] emoji in
             self?.feedback(.text(emoji))
-            self?.textDocumentProxy.insertText(emoji)
+            self?.insert(emoji)
         }
         emojiPanel.onBack = { [weak self] in
             self?.mode = .letters
@@ -81,14 +109,14 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         }
         emojiPanel.onDelete = { [weak self] in
             self?.feedback(.delete)
-            self?.textDocumentProxy.deleteBackward()
+            self?.backspace()
         }
 
         clipboardPanel.store = clipboard
         clipboardPanel.onPick = { [weak self] text in
             guard let self else { return }
             self.feedback(.text(text))
-            self.textDocumentProxy.insertText(text)
+            self.insert(text)
             self.mode = .letters
             self.afterEdit()
             self.reload()
@@ -99,11 +127,14 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         }
 
         reload()
+        applyDebugOverlay()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         mode = .letters
+        readTraits()
+        ctx = nil
         clipboard.refresh(hasFullAccess: hasFullAccess)
         afterEdit()
         reload()
@@ -114,6 +145,15 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
                 self.updateSuggestions()
                 if self.mode == .clipboard { self.clipboardPanel.reloadData() }
             }
+        }
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if !reportedLaunch {
+            reportedLaunch = true
+            let stamp = launchStamp
+            DispatchQueue.main.async { Perf.markLaunch(since: stamp) }
         }
     }
 
@@ -134,17 +174,126 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         keysArea.showsPreviews = !isLandscape
     }
 
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        reload()
+    }
+
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
+        // Changes caused by our own typing are already handled; a short
+        // pause later we double-check them once (see resync).
+        if Perf.now() - lastOwnEdit < 0.4 { return }
+        readTraits()
+        ctx = nil
+        needsRefresh = false
         afterEdit()
         reload()
     }
 
+    // MARK: Debug overlay (hidden)
+
+    private func toggleDebug() {
+        Perf.enabled.toggle()
+        UserDefaults.standard.set(Perf.enabled, forKey: "nk.debug")
+        applyDebugOverlay()
+    }
+
+    private func applyDebugOverlay() {
+        guard Perf.enabled else {
+            Perf.label?.isHidden = true
+            return
+        }
+        if Perf.label == nil {
+            let box = UILabel()
+            box.numberOfLines = 3
+            box.font = .monospacedSystemFont(ofSize: 9, weight: .medium)
+            box.textColor = .white
+            box.backgroundColor = UIColor.black.withAlphaComponent(0.8)
+            box.isUserInteractionEnabled = false
+            box.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(box)
+            NSLayoutConstraint.activate([
+                box.topAnchor.constraint(equalTo: view.topAnchor),
+                box.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 46),
+                box.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                box.heightAnchor.constraint(equalToConstant: 38),
+            ])
+            Perf.label = box
+        }
+        Perf.label?.isHidden = false
+        Perf.refresh(force: true)
+    }
+
+    // MARK: Field settings and text cache
+
+    private func readTraits() {
+        let proxy = textDocumentProxy
+        appearanceDark = proxy.keyboardAppearance == .dark
+        returnType = proxy.returnKeyType ?? .default
+        keyboardTypeCached = proxy.keyboardType ?? .default
+        autocap = proxy.autocapitalizationType ?? .sentences
+    }
+
+    /// The text just before the cursor. Uses our copy; asks the text field only if we don't have one.
+    private func context() -> String {
+        if let ctx { return ctx }
+        let real = String((textDocumentProxy.documentContextBeforeInput ?? "").suffix(200))
+        ctx = real
+        return real
+    }
+
+    private func insert(_ text: String) {
+        var current = context()
+        textDocumentProxy.insertText(text)
+        current += text
+        ctx = String(current.suffix(200))
+        noteOwnEdit()
+    }
+
+    private func backspace() {
+        var current = context()
+        textDocumentProxy.deleteBackward()
+        if !current.isEmpty { current.removeLast() }
+        // Too short to trust: read the real text next time.
+        ctx = current.count < 3 ? nil : current
+        noteOwnEdit()
+    }
+
+    private func noteOwnEdit() {
+        lastOwnEdit = Perf.now()
+        resyncGeneration &+= 1
+        let generation = resyncGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, self.resyncGeneration == generation else { return }
+            self.resync()
+        }
+    }
+
+    /// Runs once, shortly after typing stops: compare our copy with the real text.
+    private func resync() {
+        readTraits()
+        let real = String((textDocumentProxy.documentContextBeforeInput ?? "").suffix(200))
+        if real != ctx || needsRefresh {
+            ctx = real
+            needsRefresh = false
+            afterEdit()
+            reload()
+        }
+    }
+
     // MARK: Drawing
 
-    private func reload() {
-        let dark = textDocumentProxy.keyboardAppearance == .dark
-            || traitCollection.userInterfaceStyle == .dark
+    /// Redraws the keys, but only if something visible actually changed.
+    private func reload(force: Bool = false) {
+        let dark = appearanceDark || traitCollection.userInterfaceStyle == .dark
+        let state = RenderState(
+            mode: mode, shift: shift, dark: dark,
+            returnType: returnType.rawValue, globe: needsInputModeSwitchKey
+        )
+        guard force || state != rendered else { return }
+        rendered = state
+
         theme = dark ? .dark : .light
         keysArea.theme = theme
         suggestionBar.apply(theme: theme)
@@ -202,7 +351,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     }
 
     private func returnInfo() -> (title: String, blue: Bool) {
-        switch textDocumentProxy.returnKeyType ?? .default {
+        switch returnType {
         case .go: return ("go", true)
         case .google, .yahoo, .search: return ("search", true)
         case .join: return ("join", true)
@@ -221,11 +370,11 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     private static let wordEnders: Set<String> = [".", ",", "!", "?", ";", ":", "،", "؟", "؛"]
 
     func keysArea(perform action: KeyAction) {
-        let proxy = textDocumentProxy
+        let started = Perf.enabled ? Perf.now() : 0
         switch action {
         case .text(let text):
             if Self.wordEnders.contains(text) { learnCurrentWord() }
-            proxy.insertText(text)
+            insert(text)
             if shift == .once { shift = .off }
             if mode != .letters && text == "'" { mode = .letters }
         case .space:
@@ -233,10 +382,10 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             insertSpace()
             if mode == .symbols || mode == .symbols2 { mode = .letters }
         case .delete:
-            proxy.deleteBackward()
+            backspace()
         case .returnKey:
             learnCurrentWord()
-            proxy.insertText("\n")
+            insert("\n")
         case .shift:
             let now = Date()
             if shift == .locked {
@@ -257,28 +406,32 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             advanceToNextInputMode()
             return
         }
+        Perf.recordInsert()
         afterEdit()
         reload()
+        Perf.recordWork(since: started)
     }
 
     func keysAreaDeleteRepeat(wordMode: Bool) {
         if wordMode {
             deleteWord()
         } else {
-            textDocumentProxy.deleteBackward()
+            backspace()
         }
-        afterEdit()
-        reload()
+        // Suggestions catch up once deleting pauses (see resync).
+        needsRefresh = true
     }
 
     func keysAreaDeleteWord() {
         deleteWord()
-        afterEdit()
-        reload()
+        needsRefresh = true
     }
 
     func keysAreaMoveCursor(_ offset: Int) {
         textDocumentProxy.adjustTextPosition(byCharacterOffset: Layouts.isArabic ? -offset : offset)
+        ctx = nil
+        needsRefresh = true
+        noteOwnEdit()
     }
 
     func keysAreaFeedback(_ action: KeyAction) {
@@ -300,8 +453,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     }
 
     private func deleteWord() {
-        let proxy = textDocumentProxy
-        var chars = Array(proxy.documentContextBeforeInput ?? "")
+        var chars = Array(context())
         var count = 0
         while let last = chars.last, last == " " {
             chars.removeLast()
@@ -312,26 +464,25 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             count += 1
         }
         for _ in 0..<max(count, 1) {
-            proxy.deleteBackward()
+            backspace()
         }
     }
 
     /// Double-tapping space types ". " like the iOS keyboard.
     private func insertSpace() {
-        let proxy = textDocumentProxy
-        let before = proxy.documentContextBeforeInput ?? ""
+        let before = context()
         let now = Date()
         defer { lastSpaceTap = now }
         if now.timeIntervalSince(lastSpaceTap) < 0.6, before.hasSuffix(" "), before.count >= 2 {
             let previous = before[before.index(before.endIndex, offsetBy: -2)]
             if previous.isLetter || previous.isNumber {
-                proxy.deleteBackward()
-                proxy.insertText(". ")
+                backspace()
+                insert(". ")
                 lastSpaceTap = .distantPast
                 return
             }
         }
-        proxy.insertText(" ")
+        insert(" ")
     }
 
     private func afterEdit() {
@@ -341,9 +492,9 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
 
     private func updateAutoShift() {
         guard mode == .letters, !Layouts.isArabic, shift != .locked else { return }
-        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+        let before = context()
         let want: Bool
-        switch textDocumentProxy.autocapitalizationType ?? .sentences {
+        switch autocap {
         case .none:
             want = false
         case .allCharacters:
@@ -375,7 +526,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
 
     /// The word being typed, and the word before it.
     private func wordsBeforeCursor() -> (previous: String?, current: String) {
-        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+        let before = context()
         let current = Self.trailingWord(of: before)
         var rest = Substring(before).dropLast(current.count)
         while let last = rest.last, last == " " {
@@ -386,7 +537,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     }
 
     private var shouldLearn: Bool {
-        let type = textDocumentProxy.keyboardType ?? .default
+        let type = keyboardTypeCached
         return type != .URL && type != .emailAddress && type != .webSearch
     }
 
@@ -408,7 +559,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
 
         if word.isEmpty {
             var items: [Item] = []
-            let before = textDocumentProxy.documentContextBeforeInput ?? ""
+            let before = context()
             let atWordStart = before.isEmpty || before.hasSuffix(" ") || before.hasSuffix("\n")
             var predictions = atWordStart ? engine.nextWords(after: previous, limit: 3) : []
             if shift == .once {
@@ -450,20 +601,19 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     }
 
     private func applySuggestion(_ item: SuggestionBar.Item) {
-        let proxy = textDocumentProxy
         let (previous, current) = wordsBeforeCursor()
         switch item.kind {
         case .paste:
-            proxy.insertText(item.value)
+            insert(item.value)
             clipboard.markChipUsed()
         case .word:
             for _ in 0..<current.count {
-                proxy.deleteBackward()
+                backspace()
             }
-            proxy.insertText(item.value + " ")
+            insert(item.value + " ")
             if shouldLearn { engine.learn(item.value, after: previous) }
         case .next:
-            proxy.insertText(item.value + " ")
+            insert(item.value + " ")
             if shouldLearn { engine.learn(item.value, after: previous) }
         }
         feedback(.text(item.value))
