@@ -94,14 +94,27 @@ enum Layouts {
         "z": split("ž ź ż"),
     ]
 
-    private static func englishRow(_ letters: String, shifted: Bool) -> [KeySpec] {
+    private static func englishRow(_ letters: String, shifted: Bool, hints: Bool) -> [KeySpec] {
         split(letters).map { lower -> KeySpec in
             let label = shifted ? lower.uppercased() : lower
             let accents = (englishAlternates[lower] ?? []).map { shifted ? $0.uppercased() : $0 }
             let symbol = englishSymbols[lower]
             let alts = (symbol.map { [$0] } ?? []) + accents
-            return KeySpec(action: .text(label), alternates: alts, hint: symbol)
+            return KeySpec(action: .text(label), alternates: alts, hint: hints ? symbol : nil)
         }
+    }
+
+    /// With the number row off, the #+= page has one row fewer; these
+    /// symbols move to long-press on that page so none are lost.
+    private static let page2Alternates: [String: [String]] = [
+        "•": split("… ° ¶ §"),
+        "¥": split("¢"),
+        "~": split("` ´"),
+        "#": split("© ® ™"),
+    ]
+
+    private static func symbolRow(_ symbols: String, alternates: [String: [String]] = [:]) -> KeyRow {
+        KeyRow(keys: split(symbols).map { KeySpec(action: .text($0), alternates: alternates[$0] ?? []) })
     }
 
     // MARK: Arabic letters (standard iOS Arabic order, ض top-left)
@@ -122,10 +135,16 @@ enum Layouts {
 
     // MARK: Pages
 
-    static func rows(mode: KeyboardMode, shifted: Bool, showGlobe: Bool) -> [KeyRow] {
-        var rows: [KeyRow] = [numberRow()]
+    /// Number of key rows for the current setting (number row on = 5, off = 4).
+    static func rowCount(showNumbers: Bool) -> Int {
+        showNumbers ? 5 : 4
+    }
+
+    static func rows(mode: KeyboardMode, shifted: Bool, showGlobe: Bool, showNumbers: Bool, hints: Bool) -> [KeyRow] {
+        var rows: [KeyRow] = []
         switch mode {
         case .letters, .emoji, .clipboard:
+            if showNumbers { rows.append(numberRow()) }
             if isArabic {
                 rows.append(KeyRow(keys: arabicRow("ض ص ث ق ف غ ع ه خ ح ج")))
                 rows.append(KeyRow(keys: arabicRow("ش س ي ب ل ا ت ن م ك ط")))
@@ -133,25 +152,34 @@ enum Layouts {
                 last.append(KeySpec(action: .delete, width: 1))
                 rows.append(KeyRow(keys: last))
             } else {
-                rows.append(KeyRow(keys: englishRow("q w e r t y u i o p", shifted: shifted)))
-                rows.append(KeyRow(keys: englishRow("a s d f g h j k l", shifted: shifted), units: 10))
+                rows.append(KeyRow(keys: englishRow("q w e r t y u i o p", shifted: shifted, hints: hints)))
+                rows.append(KeyRow(keys: englishRow("a s d f g h j k l", shifted: shifted, hints: hints), units: 10))
                 var last = [KeySpec(action: .shift, width: 1.5)]
-                last += englishRow("z x c v b n m", shifted: shifted)
+                last += englishRow("z x c v b n m", shifted: shifted, hints: hints)
                 last.append(KeySpec(action: .delete, width: 1.5))
                 rows.append(KeyRow(keys: last))
             }
         case .symbols, .symbols2:
             let page2 = mode == .symbols2
-            let rowA: String
-            if page2 {
-                rowA = "_ \\ | ~ < > € £ ¥ •"
-            } else {
-                rowA = isArabic ? "- / : ؛ ( ) $ & @ \"" : "- / : ; ( ) $ & @ \""
-            }
-            let rowB = page2 ? "` ´ ¢ ° © ® ™ § ¶ …" : "[ ] { } # % ^ * + ="
+            let punctuationRow = isArabic ? "- / : ؛ ( ) $ & @ \"" : "- / : ; ( ) $ & @ \""
+            let bracketRow = "[ ] { } # % ^ * + ="
+            let extraRow = "_ \\ | ~ < > € £ ¥ •"
+            let rareRow = "` ´ ¢ ° © ® ™ § ¶ …"
             let punctuation = isArabic ? ". ، ؟ ! '" : ". , ? ! '"
-            rows.append(KeyRow(keys: split(rowA).map { KeySpec(action: .text($0)) }))
-            rows.append(KeyRow(keys: split(rowB).map { KeySpec(action: .text($0)) }))
+            if showNumbers {
+                // Same pages as before: digits + two symbol rows.
+                rows.append(numberRow())
+                rows.append(symbolRow(page2 ? extraRow : punctuationRow))
+                rows.append(symbolRow(page2 ? rareRow : bracketRow))
+            } else if page2 {
+                // Apple's #+= page.
+                rows.append(symbolRow(bracketRow, alternates: page2Alternates))
+                rows.append(symbolRow(extraRow, alternates: page2Alternates))
+            } else {
+                // Apple's 123 page.
+                rows.append(numberRow())
+                rows.append(symbolRow(punctuationRow))
+            }
             var last = [KeySpec(action: .mode(page2 ? .symbols : .symbols2), width: 1.5)]
             last += split(punctuation).map { KeySpec(action: .text($0), width: 1.4) }
             last.append(KeySpec(action: .delete, width: 1.5))

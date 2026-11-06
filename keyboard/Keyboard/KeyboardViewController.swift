@@ -27,7 +27,16 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         let dark: Bool
         let returnType: Int
         let globe: Bool
+        let numbers: Bool
+        let hints: Bool
+        let settings: Bool
     }
+
+    // Settings (changed by holding the emoji key).
+    private var showNumberRow = KeyboardSettings.numberRow
+    private var showHints = KeyboardSettings.hints
+    private var showingSettings = false
+    private var settingsPanel: SettingsPanel?
 
     private var mode: KeyboardMode = .letters
     private var shift: ShiftState = .off
@@ -58,7 +67,9 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     private var isLandscape: Bool { traitCollection.verticalSizeClass == .compact }
     private var barHeight: CGFloat { isLandscape ? 32 : 38 }
     private var rowPitch: CGFloat { isLandscape ? 38 : 52 }
-    private var totalHeight: CGFloat { barHeight + rowPitch * 5 + 2 }
+    private var totalHeight: CGFloat {
+        barHeight + rowPitch * CGFloat(Layouts.rowCount(showNumbers: showNumberRow)) + 2
+    }
 
     // MARK: Lifecycle
 
@@ -89,10 +100,10 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         suggestionBar.onPick = { [weak self] item in self?.applySuggestion(item) }
         suggestionBar.onClipboard = { [weak self] in
             guard let self else { return }
+            self.showingSettings = false
             self.mode = self.mode == .clipboard ? .letters : .clipboard
             self.reload()
         }
-        suggestionBar.onSecret = { [weak self] in self?.toggleDebug() }
 
         reload()
         applyDebugOverlay()
@@ -158,9 +169,41 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         return panel
     }
 
+    @discardableResult
+    private func loadSettingsPanel() -> SettingsPanel {
+        if let settingsPanel { return settingsPanel }
+        let panel = SettingsPanel()
+        panel.onToggle = { [weak self] option, on in
+            self?.settingChanged(option, on: on)
+        }
+        panel.onDone = { [weak self] in
+            self?.showingSettings = false
+            self?.reload()
+        }
+        install(panel)
+        settingsPanel = panel
+        return panel
+    }
+
+    private func settingChanged(_ option: SettingsPanel.Option, on: Bool) {
+        switch option {
+        case .numberRow:
+            showNumberRow = on
+            KeyboardSettings.numberRow = on
+            view.setNeedsLayout()
+        case .hints:
+            showHints = on
+            KeyboardSettings.hints = on
+        case .speedMeter:
+            setSpeedMeter(on)
+        }
+        reload()
+    }
+
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         mode = .letters
+        showingSettings = false
         readTraits()
         ctx = nil
         haptic.prepare()
@@ -223,10 +266,6 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     }
 
     // MARK: Debug overlay (hidden)
-
-    private func toggleDebug() {
-        setSpeedMeter(!Perf.enabled)
-    }
 
     private func setSpeedMeter(_ on: Bool) {
         Perf.enabled = on
@@ -327,7 +366,8 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         let dark = appearanceDark || traitCollection.userInterfaceStyle == .dark
         let state = RenderState(
             mode: mode, shift: shift, dark: dark,
-            returnType: returnType.rawValue, globe: needsInputModeSwitchKey
+            returnType: returnType.rawValue, globe: needsInputModeSwitchKey,
+            numbers: showNumberRow, hints: showHints, settings: showingSettings
         )
         guard force || state != rendered else { return }
         rendered = state
@@ -340,15 +380,26 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         if mode == .clipboard { loadClipboardPanel() }
         emojiPanel?.apply(theme: theme)
         clipboardPanel?.apply(theme: theme)
-        emojiPanel?.isHidden = mode != .emoji
-        clipboardPanel?.isHidden = mode != .clipboard
-        keysArea.isHidden = mode == .emoji || mode == .clipboard
+        if showingSettings {
+            let panel = loadSettingsPanel()
+            panel.set(.numberRow, on: showNumberRow)
+            panel.set(.hints, on: showHints)
+            panel.set(.speedMeter, on: Perf.enabled)
+        }
+        settingsPanel?.apply(theme: theme)
+        settingsPanel?.isHidden = !showingSettings
+        emojiPanel?.isHidden = showingSettings || mode != .emoji
+        clipboardPanel?.isHidden = showingSettings || mode != .clipboard
+        keysArea.isHidden = showingSettings || mode == .emoji || mode == .clipboard
         if mode == .clipboard, let panel = clipboardPanel {
             panel.hasFullAccess = hasFullAccess
             panel.reloadData()
         }
 
-        let rows = Layouts.rows(mode: mode, shifted: shift != .off, showGlobe: needsInputModeSwitchKey)
+        let rows = Layouts.rows(
+            mode: mode, shifted: shift != .off, showGlobe: needsInputModeSwitchKey,
+            showNumbers: showNumberRow, hints: showHints
+        )
         keysArea.setRows(rows)
         for key in keysArea.keyViews {
             configure(key)
@@ -479,6 +530,12 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
 
     func keysAreaFeedback(_ action: KeyAction) {
         feedback(action)
+    }
+
+    func keysAreaOpenSettings() {
+        keysArea.cancelAllTouches()
+        showingSettings = true
+        reload()
     }
 
     // MARK: Typing helpers

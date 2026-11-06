@@ -15,7 +15,6 @@ final class SuggestionBar: UIView {
 
     var onPick: ((Item) -> Void)?
     var onClipboard: (() -> Void)?
-    var onSecret: (() -> Void)?
 
     private let clipButton = UIButton(type: .custom)
     private var buttons: [UIButton] = []
@@ -29,9 +28,6 @@ final class SuggestionBar: UIView {
         let config = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
         clipButton.setImage(UIImage(systemName: "doc.on.clipboard", withConfiguration: config), for: .normal)
         clipButton.addTarget(self, action: #selector(clipTapped), for: .touchUpInside)
-        let hold = UILongPressGestureRecognizer(target: self, action: #selector(secretHold(_:)))
-        hold.minimumPressDuration = 1.2
-        clipButton.addGestureRecognizer(hold)
         addSubview(clipButton)
 
         for index in 0..<3 {
@@ -101,10 +97,6 @@ final class SuggestionBar: UIView {
     @objc private func tapped(_ sender: UIButton) {
         guard sender.tag < items.count, let item = items[sender.tag] else { return }
         onPick?(item)
-    }
-
-    @objc private func secretHold(_ gesture: UILongPressGestureRecognizer) {
-        if gesture.state == .began { onSecret?() }
     }
 
     @objc private func clipTapped() {

@@ -6,6 +6,7 @@ protocol KeysAreaDelegate: AnyObject {
     func keysAreaDeleteWord()
     func keysAreaMoveCursor(_ offset: Int)
     func keysAreaFeedback(_ action: KeyAction)
+    func keysAreaOpenSettings()
 }
 
 /// Lays out the keys and handles all touches: multi-touch, rollover,
@@ -225,6 +226,14 @@ final class KeysArea: UIView {
                 bringSubviewToFront(preview)
             }
             scheduleAlternates(state)
+        case .mode(.emoji):
+            // Hold the emoji key to open the keyboard settings.
+            state.longPress = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self, weak state] _ in
+                guard let self, let state, state.mode == .normal, !state.committed else { return }
+                state.committed = true
+                self.delegate?.keysAreaFeedback(.shift)
+                self.delegate?.keysAreaOpenSettings()
+            }
         default:
             break
         }
