@@ -155,10 +155,12 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             let stamp = launchStamp
             DispatchQueue.main.async { Perf.markLaunch(since: stamp) }
         }
+        Perf.startFrames()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        Perf.stopFrames()
         clipboardTimer?.invalidate()
         clipboardTimer = nil
         engine.save()
@@ -194,16 +196,23 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     // MARK: Debug overlay (hidden)
 
     private func toggleDebug() {
-        Perf.enabled.toggle()
-        UserDefaults.standard.set(Perf.enabled, forKey: "nk.debug")
+        setSpeedMeter(!Perf.enabled)
+    }
+
+    private func setSpeedMeter(_ on: Bool) {
+        Perf.enabled = on
+        UserDefaults.standard.set(on, forKey: "nk.debug")
+        Perf.reset()
         applyDebugOverlay()
     }
 
     private func applyDebugOverlay() {
         guard Perf.enabled else {
+            Perf.stopFrames()
             Perf.label?.isHidden = true
             return
         }
+        Perf.startFrames()
         if Perf.label == nil {
             let box = UILabel()
             box.numberOfLines = 3
@@ -375,17 +384,20 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         case .text(let text):
             if Self.wordEnders.contains(text) { learnCurrentWord() }
             insert(text)
+            Perf.countTyped()
             if shift == .once { shift = .off }
             if mode != .letters && text == "'" { mode = .letters }
         case .space:
             learnCurrentWord()
             insertSpace()
+            Perf.countTyped()
             if mode == .symbols || mode == .symbols2 { mode = .letters }
         case .delete:
             backspace()
         case .returnKey:
             learnCurrentWord()
             insert("\n")
+            Perf.countTyped()
         case .shift:
             let now = Date()
             if shift == .locked {

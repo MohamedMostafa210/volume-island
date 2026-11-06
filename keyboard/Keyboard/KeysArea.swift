@@ -14,7 +14,9 @@ protocol KeysAreaDelegate: AnyObject {
 final class KeysArea: UIView {
     weak var delegate: KeysAreaDelegate?
 
-    var rowPitch: CGFloat = 52 { didSet { setNeedsLayout() } }
+    var rowPitch: CGFloat = 52 {
+        didSet { if rowPitch != oldValue { setNeedsLayout() } }
+    }
     var theme: Theme = .light
     var showsPreviews = true
 
@@ -23,6 +25,10 @@ final class KeysArea: UIView {
     private var rowViews: [[KeyView]] = []
     private let hGap: CGFloat = 6
     private let sidePad: CGFloat = 3
+    /// Taps this far above the top row still count as the top row.
+    private let topReach: CGFloat = 8
+    /// How long to hold a letter before its symbol menu opens.
+    private let alternatesDelay: TimeInterval = 0.45
 
     private let preview = KeyPreviewView()
     private let alternates = AlternatesView()
@@ -35,14 +41,22 @@ final class KeysArea: UIView {
         var committed = false
         let startX: CGFloat
         var lastX: CGFloat
+        let startTime: TimeInterval
+        /// Where the finger was when it arrived on the current key.
+        var keyStart: CGPoint
+        /// Where the finger is now.
+        var point: CGPoint
         var longPress: Timer?
         var repeatTimer: Timer?
         var repeatCount = 0
 
-        init(key: KeyView, x: CGFloat) {
+        init(key: KeyView, point: CGPoint, time: TimeInterval) {
             self.key = key
-            self.startX = x
-            self.lastX = x
+            self.startX = point.x
+            self.lastX = point.x
+            self.startTime = time
+            self.keyStart = point
+            self.point = point
         }
 
         func stopTimers() {
@@ -65,6 +79,12 @@ final class KeysArea: UIView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not used")
+    }
+
+    /// Accept touches slightly above the top row, so near-misses are not lost.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        point.x >= bounds.minX && point.x <= bounds.maxX
+            && point.y >= bounds.minY - topReach && point.y <= bounds.maxY
     }
 
     // MARK: Rows
@@ -128,29 +148,49 @@ final class KeysArea: UIView {
         return best
     }
 
+    /// Keys that type something when you let go (letters, space, return).
+    private static func typesOnLift(_ action: KeyAction) -> Bool {
+        switch action {
+        case .text, .space, .returnKey: return true
+        default: return false
+        }
+    }
+
     // MARK: Touches
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        let began = Perf.enabled ? Perf.now() : 0
         for touch in touches {
             Perf.eventTime = touch.timestamp
-            // Rollover: a new finger commits any letter still held down.
-            let pending = states.values.filter { $0.mode == .normal && !$0.committed && $0.key.isCharacter }
-            for state in pending {
-                state.committed = true
-                state.stopTimers()
-                state.key.isPressed = false
-            }
-            if !pending.isEmpty { preview.hide() }
-            for state in pending {
-                delegate?.keysArea(perform: state.key.spec.action)
-            }
+            commitHeldKeys()
 
             let point = touch.location(in: self)
             guard let key = keyAt(point) else { continue }
-            let state = TouchState(key: key, x: point.x)
+            let state = TouchState(key: key, point: point, time: touch.timestamp)
             states[ObjectIdentifier(touch)] = state
+            if Self.typesOnLift(key.spec.action) { Perf.countTap() }
             press(state)
-            Perf.recordDown(eventTime: touch.timestamp)
+            Perf.recordDown(eventTime: touch.timestamp, handlerStart: began)
+        }
+    }
+
+    /// Rollover: a new finger types every key still held down (oldest first),
+    /// like Apple's keyboard. Covers letters, space and return.
+    private func commitHeldKeys() {
+        let held = states.values
+            .filter { $0.mode == .normal && !$0.committed && Self.typesOnLift($0.key.spec.action) }
+            .sorted { $0.startTime < $1.startTime }
+        guard !held.isEmpty else { return }
+        // Read the actions first: typing the first one can change shift and relabel the keys.
+        let actions = held.map { $0.key.spec.action }
+        for state in held {
+            state.committed = true
+            state.stopTimers()
+            state.key.isPressed = false
+        }
+        preview.hide()
+        for action in actions {
+            delegate?.keysArea(perform: action)
         }
     }
 
@@ -176,10 +216,8 @@ final class KeysArea: UIView {
             delegate?.keysArea(perform: .shift)
         case .space:
             state.longPress = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self, weak state] _ in
-                guard let self, let state, state.mode == .normal else { return }
-                state.mode = .trackpad
-                state.committed = true
-                self.keyViews.forEach { $0.alpha = 0.35 }
+                guard let self, let state, state.mode == .normal, !state.committed else { return }
+                self.startTrackpad(state)
             }
         case .text(let text):
             if showsPreviews {
@@ -192,11 +230,26 @@ final class KeysArea: UIView {
         }
     }
 
+    private func startTrackpad(_ state: TouchState) {
+        state.longPress?.invalidate()
+        state.longPress = nil
+        state.mode = .trackpad
+        state.committed = true
+        Perf.uncountTap()
+        keyViews.forEach { $0.alpha = 0.35 }
+    }
+
     private func scheduleAlternates(_ state: TouchState) {
         state.longPress?.invalidate()
+        state.longPress = nil
+        state.keyStart = state.point
         guard !state.key.spec.alternates.isEmpty else { return }
-        state.longPress = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self, weak state] _ in
+        state.longPress = Timer.scheduledTimer(withTimeInterval: alternatesDelay, repeats: false) { [weak self, weak state] _ in
             guard let self, let state, state.mode == .normal, !state.committed else { return }
+            // Only open the menu if the finger stayed still (not mid-typing).
+            let dx = state.point.x - state.keyStart.x
+            let dy = state.point.y - state.keyStart.y
+            guard dx * dx + dy * dy <= 144 else { return }
             state.mode = .alternates
             self.preview.hide()
             self.delegate?.keysAreaFeedback(.shift)
@@ -209,6 +262,7 @@ final class KeysArea: UIView {
         for touch in touches {
             guard let state = states[ObjectIdentifier(touch)] else { continue }
             let point = touch.location(in: self)
+            state.point = point
             switch state.mode {
             case .alternates:
                 alternates.select(atX: point.x)
@@ -233,10 +287,9 @@ final class KeysArea: UIView {
                 switch state.key.spec.action {
                 case .space:
                     // Swipe on space moves the cursor straight away.
-                    if abs(point.x - state.startX) > 12 {
-                        state.longPress?.invalidate()
-                        state.mode = .trackpad
-                        state.committed = true
+                    // (Not if the space was already typed by a following key.)
+                    if !state.committed, abs(point.x - state.startX) > 12 {
+                        startTrackpad(state)
                         state.lastX = point.x
                     }
                 case .delete:
@@ -288,8 +341,16 @@ final class KeysArea: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-            if let state = states.removeValue(forKey: ObjectIdentifier(touch)) {
-                finish(state)
+            guard let state = states.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
+            let action = state.key.spec.action
+            // iOS sometimes cancels a quick tap (for example when it thinks a
+            // screen-edge swipe started). Apple's keyboard still types it, so we do too.
+            let shouldType = state.mode == .normal && !state.committed
+                && Self.typesOnLift(action) && touch.timestamp - state.startTime < 0.5
+            finish(state)
+            if shouldType {
+                Perf.eventTime = touch.timestamp
+                delegate?.keysArea(perform: action)
             }
         }
     }

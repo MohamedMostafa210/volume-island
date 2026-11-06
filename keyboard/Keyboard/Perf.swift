@@ -1,8 +1,8 @@
 import Darwin
+import QuartzCore
 import UIKit
 
-/// Hidden speed meter. Off by default. Turn it on or off by holding the
-/// clipboard button (left end of the suggestion bar) for about 1.2 seconds.
+/// Hidden speed meter. Off by default.
 /// When off, every function here returns after a single true/false check.
 enum Perf {
     static var enabled: Bool = UserDefaults.standard.bool(forKey: "nk.debug")
@@ -17,17 +17,33 @@ enum Perf {
     }
 
     private static var launchMs: Double = 0
-    private static var downMs: Double = 0
+    private static var deliveryMs: Double = 0
+    private static var oursDownMs: Double = 0
     private static var insertMs: Double = 0
     private static var workMs: Double = 0
+    private static var taps = 0
+    private static var typed = 0
     private static var insertSamples: [Sample] = []
     private static var workSamples: [Sample] = []
+    private static var dropSamples: [Sample] = []
     private static var lastRefresh: TimeInterval = 0
     private static var refreshQueued = false
+    private static let frames = FrameMonitor()
 
     static func now() -> TimeInterval {
         ProcessInfo.processInfo.systemUptime
     }
+
+    /// Clears the counters (when the meter is switched on).
+    static func reset() {
+        taps = 0
+        typed = 0
+        insertSamples.removeAll()
+        workSamples.removeAll()
+        dropSamples.removeAll()
+    }
+
+    // MARK: Recording
 
     /// Keyboard launch: object created -> on screen.
     static func markLaunch(since start: TimeInterval) {
@@ -35,11 +51,28 @@ enum Perf {
         refresh(force: true)
     }
 
-    /// Finger lands -> key highlight and popup code finished.
-    static func recordDown(eventTime: TimeInterval) {
+    /// Finger lands. "iOS" = until our code got the touch. "ours" = our touch-down work.
+    static func recordDown(eventTime: TimeInterval, handlerStart: TimeInterval) {
         guard enabled else { return }
-        downMs = (now() - eventTime) * 1000
+        deliveryMs = (handlerStart - eventTime) * 1000
+        oursDownMs = (now() - handlerStart) * 1000
         refresh()
+    }
+
+    static func countTap() {
+        guard enabled else { return }
+        taps += 1
+    }
+
+    /// A space touch that became a cursor swipe was not meant to type.
+    static func uncountTap() {
+        guard enabled else { return }
+        taps -= 1
+    }
+
+    static func countTyped() {
+        guard enabled else { return }
+        typed += 1
     }
 
     /// Finger lifts -> letter handed to the text field.
@@ -50,14 +83,30 @@ enum Perf {
         insertSamples.append(Sample(time: t, value: insertMs))
     }
 
-    /// Finger lifts -> everything (insert, suggestions, redraw) finished.
+    /// How long our code worked on one key (insert, suggestions, redraw).
     static func recordWork(since start: TimeInterval) {
         guard enabled else { return }
         let t = now()
         workMs = (t - start) * 1000
-        workSamples.append(Sample(time: t, value: (t - eventTime) * 1000))
+        workSamples.append(Sample(time: t, value: workMs))
         refresh()
     }
+
+    // MARK: Frame counter
+
+    static func startFrames() {
+        guard enabled else { return }
+        frames.onDrop = { missed in
+            dropSamples.append(Sample(time: now(), value: Double(missed)))
+        }
+        frames.start()
+    }
+
+    static func stopFrames() {
+        frames.stop()
+    }
+
+    // MARK: Display
 
     static func refresh(force: Bool = false) {
         guard enabled, let box = label else { return }
@@ -73,11 +122,14 @@ enum Perf {
             return
         }
         lastRefresh = t
-        let slowInsert = recentMax(&insertSamples, at: t)
-        let slowTotal = recentMax(&workSamples, at: t)
+        let worstInsert = recentMax(&insertSamples, at: t)
+        let worstWork = recentMax(&workSamples, at: t)
+        dropSamples.removeAll { t - $0.time > 30 }
+        let lost = Int(dropSamples.reduce(0) { $0 + $1.value })
         box.text = String(
-            format: "launch %.0f ms   memory %.1f MB\ntap>popup %.1f   lift>text %.1f (slowest %.1f)\nlift>all done %.1f (slowest %.1f)   ms, last 30s",
-            launchMs, memoryMB(), downMs, insertMs, slowInsert, workMs, slowTotal
+            format: "launch %.0f ms  mem %.1f MB  lost frames %d\ntouch: iOS %.1f + ours %.1f ms  taps %d typed %d\nlift>text %.1f (worst %.1f)  our work %.1f (worst %.1f)",
+            launchMs, memoryMB(), lost, deliveryMs, oursDownMs, taps, typed,
+            insertMs, worstInsert, workMs, worstWork
         )
     }
 
@@ -97,5 +149,36 @@ enum Perf {
         }
         guard result == KERN_SUCCESS else { return 0 }
         return Double(info.phys_footprint) / 1_048_576
+    }
+}
+
+/// Counts screen frames that were skipped (only runs while the speed meter is on).
+private final class FrameMonitor: NSObject {
+    private var link: CADisplayLink?
+    private var last: CFTimeInterval = 0
+    var onDrop: ((Int) -> Void)?
+
+    func start() {
+        guard link == nil else { return }
+        let newLink = CADisplayLink(target: self, selector: #selector(tick(_:)))
+        newLink.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        newLink.add(to: .main, forMode: .common)
+        link = newLink
+        last = 0
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        let frame = link.targetTimestamp - link.timestamp
+        if last > 0, frame > 0 {
+            let gap = link.timestamp - last
+            let missed = Int((gap / frame).rounded()) - 1
+            if missed > 0 { onDrop?(missed) }
+        }
+        last = link.timestamp
     }
 }
