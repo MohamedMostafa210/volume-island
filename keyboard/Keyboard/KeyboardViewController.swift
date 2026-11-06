@@ -1,5 +1,9 @@
-import AudioToolbox
 import UIKit
+
+/// Lets the keyboard play Apple's own key click (obeys Settings > Sounds > Keyboard Clicks).
+extension UIInputView: UIInputViewAudioFeedback {
+    public var enableInputClicksWhenVisible: Bool { true }
+}
 
 final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     // Must stay the first property: it stamps the moment the keyboard starts being built.
@@ -8,8 +12,9 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
 
     private let suggestionBar = SuggestionBar()
     private let keysArea = KeysArea()
-    private let emojiPanel = EmojiPanel()
-    private let clipboardPanel = ClipboardPanel()
+    // Created the first time they are opened, to keep startup light.
+    private var emojiPanel: EmojiPanel?
+    private var clipboardPanel: ClipboardPanel?
     private var heightConstraint: NSLayoutConstraint?
     private var barHeightConstraint: NSLayoutConstraint?
 
@@ -44,8 +49,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     private var needsRefresh = false
 
     private let haptic = UIImpactFeedbackGenerator(style: .light)
-    private let checker = UITextChecker()
-    private lazy var engine = WordEngine()
+    private let predictor = Predictor()
     private let clipboard = ClipboardStore()
     private var clipboardTimer: Timer?
 
@@ -62,28 +66,19 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         super.viewDidLoad()
         readTraits()
 
-        for sub in [suggestionBar, keysArea, emojiPanel, clipboardPanel] as [UIView] {
+        for sub in [suggestionBar, keysArea] as [UIView] {
             sub.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(sub)
         }
 
         let barHeight = suggestionBar.heightAnchor.constraint(equalToConstant: self.barHeight)
         barHeightConstraint = barHeight
-        var constraints = [
+        NSLayoutConstraint.activate([
             suggestionBar.topAnchor.constraint(equalTo: view.topAnchor),
             suggestionBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             suggestionBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             barHeight,
-        ]
-        for panel in [keysArea, emojiPanel, clipboardPanel] as [UIView] {
-            constraints += [
-                panel.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor),
-                panel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-                panel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                panel.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            ]
-        }
-        NSLayoutConstraint.activate(constraints)
+        ] + panelConstraints(keysArea))
 
         let height = view.heightAnchor.constraint(equalToConstant: totalHeight)
         height.priority = UILayoutPriority(999)
@@ -99,21 +94,54 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         }
         suggestionBar.onSecret = { [weak self] in self?.toggleDebug() }
 
-        emojiPanel.onPick = { [weak self] emoji in
+        reload()
+        applyDebugOverlay()
+    }
+
+    // MARK: Panels (made on first use)
+
+    private func panelConstraints(_ panel: UIView) -> [NSLayoutConstraint] {
+        [
+            panel.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor),
+            panel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            panel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            panel.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ]
+    }
+
+    private func install(_ panel: UIView) {
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        view.insertSubview(panel, aboveSubview: keysArea)
+        NSLayoutConstraint.activate(panelConstraints(panel))
+    }
+
+    @discardableResult
+    private func loadEmojiPanel() -> EmojiPanel {
+        if let emojiPanel { return emojiPanel }
+        let panel = EmojiPanel()
+        panel.onPick = { [weak self] emoji in
             self?.feedback(.text(emoji))
             self?.insert(emoji)
         }
-        emojiPanel.onBack = { [weak self] in
+        panel.onBack = { [weak self] in
             self?.mode = .letters
             self?.reload()
         }
-        emojiPanel.onDelete = { [weak self] in
+        panel.onDelete = { [weak self] in
             self?.feedback(.delete)
             self?.backspace()
         }
+        install(panel)
+        emojiPanel = panel
+        return panel
+    }
 
-        clipboardPanel.store = clipboard
-        clipboardPanel.onPick = { [weak self] text in
+    @discardableResult
+    private func loadClipboardPanel() -> ClipboardPanel {
+        if let clipboardPanel { return clipboardPanel }
+        let panel = ClipboardPanel()
+        panel.store = clipboard
+        panel.onPick = { [weak self] text in
             guard let self else { return }
             self.feedback(.text(text))
             self.insert(text)
@@ -121,13 +149,13 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             self.afterEdit()
             self.reload()
         }
-        clipboardPanel.onBack = { [weak self] in
+        panel.onBack = { [weak self] in
             self?.mode = .letters
             self?.reload()
         }
-
-        reload()
-        applyDebugOverlay()
+        install(panel)
+        clipboardPanel = panel
+        return panel
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -135,6 +163,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         mode = .letters
         readTraits()
         ctx = nil
+        haptic.prepare()
         clipboard.refresh(hasFullAccess: hasFullAccess)
         afterEdit()
         reload()
@@ -143,7 +172,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             guard let self else { return }
             if self.clipboard.refresh(hasFullAccess: self.hasFullAccess) {
                 self.updateSuggestions()
-                if self.mode == .clipboard { self.clipboardPanel.reloadData() }
+                if self.mode == .clipboard { self.clipboardPanel?.reloadData() }
             }
         }
     }
@@ -163,7 +192,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         Perf.stopFrames()
         clipboardTimer?.invalidate()
         clipboardTimer = nil
-        engine.save()
+        predictor.saveNow()
     }
 
     override func viewWillLayoutSubviews() {
@@ -306,15 +335,17 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         theme = dark ? .dark : .light
         keysArea.theme = theme
         suggestionBar.apply(theme: theme)
-        emojiPanel.apply(theme: theme)
-        clipboardPanel.apply(theme: theme)
 
-        emojiPanel.isHidden = mode != .emoji
-        clipboardPanel.isHidden = mode != .clipboard
+        if mode == .emoji { loadEmojiPanel() }
+        if mode == .clipboard { loadClipboardPanel() }
+        emojiPanel?.apply(theme: theme)
+        clipboardPanel?.apply(theme: theme)
+        emojiPanel?.isHidden = mode != .emoji
+        clipboardPanel?.isHidden = mode != .clipboard
         keysArea.isHidden = mode == .emoji || mode == .clipboard
-        if mode == .clipboard {
-            clipboardPanel.hasFullAccess = hasFullAccess
-            clipboardPanel.reloadData()
+        if mode == .clipboard, let panel = clipboardPanel {
+            panel.hasFullAccess = hasFullAccess
+            panel.reloadData()
         }
 
         let rows = Layouts.rows(mode: mode, shifted: shift != .off, showGlobe: needsInputModeSwitchKey)
@@ -455,13 +486,9 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     private func feedback(_ action: KeyAction) {
         guard hasFullAccess else { return }
         haptic.impactOccurred()
-        let sound: SystemSoundID
-        switch action {
-        case .text, .space: sound = 1104
-        case .delete: sound = 1155
-        default: sound = 1156
-        }
-        AudioServicesPlaySystemSound(sound)
+        // Keep the vibration motor warmed up so the next tap is instant.
+        haptic.prepare()
+        UIDevice.current.playInputClick()
     }
 
     private func deleteWord() {
@@ -557,27 +584,29 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         guard shouldLearn else { return }
         let (previous, current) = wordsBeforeCursor()
         guard !current.isEmpty else { return }
-        engine.learn(current, after: previous)
+        predictor.learn(current, after: previous)
     }
 
-    private func matchCase(_ word: String, like typed: String) -> String {
-        guard typed.first?.isUppercase ?? false else { return word }
-        return word.prefix(1).uppercased() + word.dropFirst()
-    }
-
+    /// Asks the background predictor; the bar updates when the answer comes back.
     private func updateSuggestions() {
         let (previous, word) = wordsBeforeCursor()
+        let before = context()
+        let atWordStart = before.isEmpty || before.hasSuffix(" ") || before.hasSuffix("\n")
+        let request = Predictor.Request(
+            previous: previous, word: word,
+            atWordStart: atWordStart, capitalize: shift == .once
+        )
+        predictor.suggest(request) { [weak self] words in
+            self?.showSuggestions(words, typed: word)
+        }
+    }
+
+    private func showSuggestions(_ words: [String], typed word: String) {
         typealias Item = SuggestionBar.Item
 
         if word.isEmpty {
             var items: [Item] = []
-            let before = context()
-            let atWordStart = before.isEmpty || before.hasSuffix(" ") || before.hasSuffix("\n")
-            var predictions = atWordStart ? engine.nextWords(after: previous, limit: 3) : []
-            if shift == .once {
-                predictions = predictions.map { $0.prefix(1).uppercased() + $0.dropFirst() }
-            }
-            let next = predictions.map { Item(title: $0, value: $0, kind: .next) }
+            let next = words.map { Item(title: $0, value: $0, kind: .next) }
 
             if let clip = clipboard.recentChip {
                 let short = clip.count > 18 ? String(clip.prefix(18)) + "…" : clip
@@ -593,22 +622,8 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             return
         }
 
-        var picks: [String] = []
-        var seen = Set<String>([word.lowercased()])
-        func add(_ candidate: String) {
-            let fixed = matchCase(candidate, like: word)
-            if seen.insert(fixed.lowercased()).inserted { picks.append(fixed) }
-        }
-
-        if !engine.isKnown(word) {
-            let range = NSRange(location: 0, length: (word as NSString).length)
-            let guesses = checker.guesses(forWordRange: range, in: word, language: Layouts.spellLanguage) ?? []
-            guesses.prefix(2).forEach(add)
-        }
-        engine.completions(for: word, limit: 4).forEach(add)
-
         var items = [Item(title: "\u{201C}\(word)\u{201D}", value: word, kind: .word)]
-        items += picks.prefix(2).map { Item(title: $0, value: $0, kind: .word) }
+        items += words.prefix(2).map { Item(title: $0, value: $0, kind: .word) }
         suggestionBar.set(items)
     }
 
@@ -623,10 +638,10 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
                 backspace()
             }
             insert(item.value + " ")
-            if shouldLearn { engine.learn(item.value, after: previous) }
+            if shouldLearn { predictor.learn(item.value, after: previous) }
         case .next:
             insert(item.value + " ")
-            if shouldLearn { engine.learn(item.value, after: previous) }
+            if shouldLearn { predictor.learn(item.value, after: previous) }
         }
         feedback(.text(item.value))
         afterEdit()
