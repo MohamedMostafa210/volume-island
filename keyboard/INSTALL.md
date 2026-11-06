@@ -17,3 +17,10 @@
 4. Optional: remove Apple's English and Arabic keyboards so the globe only switches between these two.
 
 Re-install with Sideloadly every 7 days.
+
+## Gestures (v2)
+- Long-press a letter: types the small symbol in its corner. Slide for accents.
+- Swipe on space: moves the cursor.
+- Swipe left from delete: erases whole words.
+- Clipboard icon (top-left of the bar): copied text history. Needs Allow Full Access.
+- Predictions learn the words you use.
