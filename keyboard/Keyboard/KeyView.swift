@@ -4,6 +4,7 @@ final class KeyView: UIView {
     var spec: KeySpec
     private let label = UILabel()
     private let icon = UIImageView()
+    private let hintLabel = UILabel()
     private var baseColor: UIColor = .white
     private var pressedColor: UIColor = .lightGray
 
@@ -34,8 +35,11 @@ final class KeyView: UIView {
         label.minimumScaleFactor = 0.5
         label.baselineAdjustment = .alignCenters
         icon.contentMode = .center
+        hintLabel.font = .systemFont(ofSize: 10, weight: .medium)
+        hintLabel.textAlignment = .right
         addSubview(label)
         addSubview(icon)
+        addSubview(hintLabel)
     }
 
     required init?(coder: NSCoder) {
@@ -46,10 +50,14 @@ final class KeyView: UIView {
         super.layoutSubviews()
         label.frame = bounds.insetBy(dx: 3, dy: 0)
         icon.frame = bounds
+        hintLabel.frame = CGRect(x: bounds.width - 16, y: 2, width: 13, height: 12)
         layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
     }
 
-    func configure(text: String?, image: String?, special: Bool, accent: Bool, theme: Theme) {
+    func configure(text: String?, image: String?, special: Bool, accent: Bool, theme: Theme, hint: String? = nil) {
+        hintLabel.text = hint
+        hintLabel.isHidden = hint == nil
+        hintLabel.textColor = theme.text.withAlphaComponent(0.45)
         label.text = text
         label.isHidden = text == nil
         if isCharacter {

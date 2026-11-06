@@ -5,7 +5,9 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     private let suggestionBar = SuggestionBar()
     private let keysArea = KeysArea()
     private let emojiPanel = EmojiPanel()
+    private let clipboardPanel = ClipboardPanel()
     private var heightConstraint: NSLayoutConstraint?
+    private var barHeightConstraint: NSLayoutConstraint?
 
     private enum ShiftState { case off, once, locked }
 
@@ -17,42 +19,44 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
 
     private let haptic = UIImpactFeedbackGenerator(style: .light)
     private let checker = UITextChecker()
+    private lazy var engine = WordEngine()
+    private let clipboard = ClipboardStore()
+    private var clipboardTimer: Timer?
 
     // MARK: Metrics
 
     private var isLandscape: Bool { traitCollection.verticalSizeClass == .compact }
-    private var barHeight: CGFloat { isLandscape ? 34 : 44 }
-    private var rowPitch: CGFloat { isLandscape ? 40 : 54 }
-    private var totalHeight: CGFloat { barHeight + rowPitch * 5 + 4 }
+    private var barHeight: CGFloat { isLandscape ? 32 : 38 }
+    private var rowPitch: CGFloat { isLandscape ? 38 : 52 }
+    private var totalHeight: CGFloat { barHeight + rowPitch * 5 + 2 }
 
     // MARK: Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        for sub in [suggestionBar, keysArea, emojiPanel] as [UIView] {
+        for sub in [suggestionBar, keysArea, emojiPanel, clipboardPanel] as [UIView] {
             sub.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(sub)
         }
 
-        let barHeightConstraint = suggestionBar.heightAnchor.constraint(equalToConstant: barHeight)
-        barHeightConstraint.identifier = "bar"
-        NSLayoutConstraint.activate([
+        let barHeight = suggestionBar.heightAnchor.constraint(equalToConstant: self.barHeight)
+        barHeightConstraint = barHeight
+        var constraints = [
             suggestionBar.topAnchor.constraint(equalTo: view.topAnchor),
             suggestionBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             suggestionBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            barHeightConstraint,
-
-            keysArea.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor),
-            keysArea.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            keysArea.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            keysArea.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-
-            emojiPanel.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor),
-            emojiPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            emojiPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            emojiPanel.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-        ])
+            barHeight,
+        ]
+        for panel in [keysArea, emojiPanel, clipboardPanel] as [UIView] {
+            constraints += [
+                panel.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor),
+                panel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                panel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                panel.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            ]
+        }
+        NSLayoutConstraint.activate(constraints)
 
         let height = view.heightAnchor.constraint(equalToConstant: totalHeight)
         height.priority = UILayoutPriority(999)
@@ -60,7 +64,13 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         heightConstraint = height
 
         keysArea.delegate = self
-        suggestionBar.onPick = { [weak self] value in self?.applySuggestion(value) }
+        suggestionBar.onPick = { [weak self] item in self?.applySuggestion(item) }
+        suggestionBar.onClipboard = { [weak self] in
+            guard let self else { return }
+            self.mode = self.mode == .clipboard ? .letters : .clipboard
+            self.reload()
+        }
+
         emojiPanel.onPick = { [weak self] emoji in
             self?.feedback(.text(emoji))
             self?.textDocumentProxy.insertText(emoji)
@@ -74,23 +84,51 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             self?.textDocumentProxy.deleteBackward()
         }
 
+        clipboardPanel.store = clipboard
+        clipboardPanel.onPick = { [weak self] text in
+            guard let self else { return }
+            self.feedback(.text(text))
+            self.textDocumentProxy.insertText(text)
+            self.mode = .letters
+            self.afterEdit()
+            self.reload()
+        }
+        clipboardPanel.onBack = { [weak self] in
+            self?.mode = .letters
+            self?.reload()
+        }
+
         reload()
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         mode = .letters
+        clipboard.refresh(hasFullAccess: hasFullAccess)
         afterEdit()
         reload()
+        clipboardTimer?.invalidate()
+        clipboardTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if self.clipboard.refresh(hasFullAccess: self.hasFullAccess) {
+                self.updateSuggestions()
+                if self.mode == .clipboard { self.clipboardPanel.reloadData() }
+            }
+        }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        clipboardTimer?.invalidate()
+        clipboardTimer = nil
+        engine.save()
     }
 
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
         if heightConstraint?.constant != totalHeight {
             heightConstraint?.constant = totalHeight
-            for constraint in suggestionBar.constraints where constraint.identifier == "bar" {
-                constraint.constant = barHeight
-            }
+            barHeightConstraint?.constant = barHeight
         }
         keysArea.rowPitch = rowPitch
         keysArea.showsPreviews = !isLandscape
@@ -111,10 +149,15 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         keysArea.theme = theme
         suggestionBar.apply(theme: theme)
         emojiPanel.apply(theme: theme)
+        clipboardPanel.apply(theme: theme)
 
-        let showEmoji = mode == .emoji
-        emojiPanel.isHidden = !showEmoji
-        keysArea.isHidden = showEmoji
+        emojiPanel.isHidden = mode != .emoji
+        clipboardPanel.isHidden = mode != .clipboard
+        keysArea.isHidden = mode == .emoji || mode == .clipboard
+        if mode == .clipboard {
+            clipboardPanel.hasFullAccess = hasFullAccess
+            clipboardPanel.reloadData()
+        }
 
         let rows = Layouts.rows(mode: mode, shifted: shift != .off, showGlobe: needsInputModeSwitchKey)
         keysArea.setRows(rows)
@@ -126,7 +169,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     private func configure(_ key: KeyView) {
         switch key.spec.action {
         case .text(let text):
-            key.configure(text: text, image: nil, special: false, accent: false, theme: theme)
+            key.configure(text: text, image: nil, special: false, accent: false, theme: theme, hint: key.spec.hint)
         case .space:
             key.configure(text: Layouts.isArabic ? "مسافة" : "space", image: nil, special: false, accent: false, theme: theme)
         case .shift:
@@ -146,7 +189,7 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
             key.configure(text: info.title, image: nil, special: true, accent: info.blue, theme: theme)
         case .mode(let target):
             switch target {
-            case .letters:
+            case .letters, .clipboard:
                 key.configure(text: Layouts.isArabic ? "أبج" : "ABC", image: nil, special: true, accent: false, theme: theme)
             case .symbols:
                 key.configure(text: "123", image: nil, special: true, accent: false, theme: theme)
@@ -175,19 +218,24 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
 
     // MARK: KeysAreaDelegate
 
+    private static let wordEnders: Set<String> = [".", ",", "!", "?", ";", ":", "،", "؟", "؛"]
+
     func keysArea(perform action: KeyAction) {
         let proxy = textDocumentProxy
         switch action {
         case .text(let text):
+            if Self.wordEnders.contains(text) { learnCurrentWord() }
             proxy.insertText(text)
             if shift == .once { shift = .off }
             if mode != .letters && text == "'" { mode = .letters }
         case .space:
+            learnCurrentWord()
             insertSpace()
             if mode == .symbols || mode == .symbols2 { mode = .letters }
         case .delete:
             proxy.deleteBackward()
         case .returnKey:
+            learnCurrentWord()
             proxy.insertText("\n")
         case .shift:
             let now = Date()
@@ -214,24 +262,17 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
     }
 
     func keysAreaDeleteRepeat(wordMode: Bool) {
-        let proxy = textDocumentProxy
         if wordMode {
-            var chars = Array(proxy.documentContextBeforeInput ?? "")
-            var count = 0
-            while let last = chars.last, last == " " {
-                chars.removeLast()
-                count += 1
-            }
-            while let last = chars.last, last != " ", last != "\n" {
-                chars.removeLast()
-                count += 1
-            }
-            for _ in 0..<max(count, 1) {
-                proxy.deleteBackward()
-            }
+            deleteWord()
         } else {
-            proxy.deleteBackward()
+            textDocumentProxy.deleteBackward()
         }
+        afterEdit()
+        reload()
+    }
+
+    func keysAreaDeleteWord() {
+        deleteWord()
         afterEdit()
         reload()
     }
@@ -256,6 +297,23 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         default: sound = 1156
         }
         AudioServicesPlaySystemSound(sound)
+    }
+
+    private func deleteWord() {
+        let proxy = textDocumentProxy
+        var chars = Array(proxy.documentContextBeforeInput ?? "")
+        var count = 0
+        while let last = chars.last, last == " " {
+            chars.removeLast()
+            count += 1
+        }
+        while let last = chars.last, last != " ", last != "\n" {
+            chars.removeLast()
+            count += 1
+        }
+        for _ in 0..<max(count, 1) {
+            proxy.deleteBackward()
+        }
     }
 
     /// Double-tapping space types ". " like the iOS keyboard.
@@ -305,53 +363,110 @@ final class KeyboardViewController: UIInputViewController, KeysAreaDelegate {
         shift = want ? .once : .off
     }
 
-    private func currentWord() -> String {
-        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+    // MARK: Words
+
+    private static func trailingWord(of text: String) -> String {
         var chars: [Character] = []
-        for ch in before.reversed() {
+        for ch in text.reversed() {
             if ch.isLetter || ch == "'" { chars.append(ch) } else { break }
         }
         return String(chars.reversed())
     }
 
+    /// The word being typed, and the word before it.
+    private func wordsBeforeCursor() -> (previous: String?, current: String) {
+        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+        let current = Self.trailingWord(of: before)
+        var rest = Substring(before).dropLast(current.count)
+        while let last = rest.last, last == " " {
+            rest = rest.dropLast()
+        }
+        let previous = Self.trailingWord(of: String(rest))
+        return (previous.isEmpty ? nil : previous, current)
+    }
+
+    private var shouldLearn: Bool {
+        let type = textDocumentProxy.keyboardType ?? .default
+        return type != .URL && type != .emailAddress && type != .webSearch
+    }
+
+    private func learnCurrentWord() {
+        guard shouldLearn else { return }
+        let (previous, current) = wordsBeforeCursor()
+        guard !current.isEmpty else { return }
+        engine.learn(current, after: previous)
+    }
+
+    private func matchCase(_ word: String, like typed: String) -> String {
+        guard typed.first?.isUppercase ?? false else { return word }
+        return word.prefix(1).uppercased() + word.dropFirst()
+    }
+
     private func updateSuggestions() {
-        let word = currentWord()
-        guard !word.isEmpty else {
-            suggestionBar.set([])
+        let (previous, word) = wordsBeforeCursor()
+        typealias Item = SuggestionBar.Item
+
+        if word.isEmpty {
+            var items: [Item] = []
+            let before = textDocumentProxy.documentContextBeforeInput ?? ""
+            let atWordStart = before.isEmpty || before.hasSuffix(" ") || before.hasSuffix("\n")
+            var predictions = atWordStart ? engine.nextWords(after: previous, limit: 3) : []
+            if shift == .once {
+                predictions = predictions.map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            }
+            let next = predictions.map { Item(title: $0, value: $0, kind: .next) }
+
+            if let clip = clipboard.recentChip {
+                let short = clip.count > 18 ? String(clip.prefix(18)) + "…" : clip
+                items.append(Item(title: "📋 " + short, value: clip, kind: .paste))
+                items += next.prefix(2)
+            } else if next.count == 3 {
+                // Best prediction in the middle, like Gboard.
+                items = [next[1], next[0], next[2]]
+            } else {
+                items = next
+            }
+            suggestionBar.set(items)
             return
         }
-        let language = Layouts.spellLanguage
-        let range = NSRange(location: 0, length: (word as NSString).length)
-        var candidates: [String] = []
-        let misspelled = checker.rangeOfMisspelledWord(in: word, range: range, startingAt: 0, wrap: false, language: language)
-        if misspelled.location != NSNotFound {
-            candidates += checker.guesses(forWordRange: range, in: word, language: language) ?? []
-        }
-        candidates += checker.completions(forPartialWordRange: range, in: word, language: language) ?? []
 
-        let capitalize = word.first?.isUppercase ?? false
-        var seen = Set<String>()
         var picks: [String] = []
-        for candidate in candidates {
-            let fixed = capitalize ? candidate.prefix(1).uppercased() + candidate.dropFirst() : candidate
-            guard fixed.lowercased() != word.lowercased(), seen.insert(fixed).inserted else { continue }
-            picks.append(fixed)
-            if picks.count == 2 { break }
+        var seen = Set<String>([word.lowercased()])
+        func add(_ candidate: String) {
+            let fixed = matchCase(candidate, like: word)
+            if seen.insert(fixed.lowercased()).inserted { picks.append(fixed) }
         }
 
-        var items = [SuggestionBar.Item(title: "\u{201C}\(word)\u{201D}", value: word)]
-        items += picks.map { SuggestionBar.Item(title: $0, value: $0) }
+        if !engine.isKnown(word) {
+            let range = NSRange(location: 0, length: (word as NSString).length)
+            let guesses = checker.guesses(forWordRange: range, in: word, language: Layouts.spellLanguage) ?? []
+            guesses.prefix(2).forEach(add)
+        }
+        engine.completions(for: word, limit: 4).forEach(add)
+
+        var items = [Item(title: "\u{201C}\(word)\u{201D}", value: word, kind: .word)]
+        items += picks.prefix(2).map { Item(title: $0, value: $0, kind: .word) }
         suggestionBar.set(items)
     }
 
-    private func applySuggestion(_ value: String) {
+    private func applySuggestion(_ item: SuggestionBar.Item) {
         let proxy = textDocumentProxy
-        let word = currentWord()
-        for _ in 0..<word.count {
-            proxy.deleteBackward()
+        let (previous, current) = wordsBeforeCursor()
+        switch item.kind {
+        case .paste:
+            proxy.insertText(item.value)
+            clipboard.markChipUsed()
+        case .word:
+            for _ in 0..<current.count {
+                proxy.deleteBackward()
+            }
+            proxy.insertText(item.value + " ")
+            if shouldLearn { engine.learn(item.value, after: previous) }
+        case .next:
+            proxy.insertText(item.value + " ")
+            if shouldLearn { engine.learn(item.value, after: previous) }
         }
-        proxy.insertText(value + " ")
-        feedback(.text(value))
+        feedback(.text(item.value))
         afterEdit()
         reload()
     }

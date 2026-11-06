@@ -86,6 +86,8 @@ final class AlternatesView: UIView {
             label.text = option
             label.textAlignment = .center
             label.font = .systemFont(ofSize: 24)
+            label.adjustsFontSizeToFitWidth = true
+            label.minimumScaleFactor = 0.5
             label.layer.cornerRadius = 7
             label.clipsToBounds = true
             addSubview(label)

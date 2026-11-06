@@ -3,16 +3,18 @@ import UIKit
 protocol KeysAreaDelegate: AnyObject {
     func keysArea(perform action: KeyAction)
     func keysAreaDeleteRepeat(wordMode: Bool)
+    func keysAreaDeleteWord()
     func keysAreaMoveCursor(_ offset: Int)
     func keysAreaFeedback(_ action: KeyAction)
 }
 
-/// Lays out the keys and handles all touches (multi-touch, rollover,
-/// long-press alternates, delete repeat and space-bar cursor control).
+/// Lays out the keys and handles all touches: multi-touch, rollover,
+/// long-press symbols, delete repeat, swipe-left-to-delete-words and
+/// space-bar cursor control (swipe or long-press).
 final class KeysArea: UIView {
     weak var delegate: KeysAreaDelegate?
 
-    var rowPitch: CGFloat = 54 { didSet { setNeedsLayout() } }
+    var rowPitch: CGFloat = 52 { didSet { setNeedsLayout() } }
     var theme: Theme = .light
     var showsPreviews = true
 
@@ -25,12 +27,13 @@ final class KeysArea: UIView {
     private let preview = KeyPreviewView()
     private let alternates = AlternatesView()
 
-    private enum TouchMode { case normal, alternates, trackpad }
+    private enum TouchMode { case normal, alternates, trackpad, swipeDelete }
 
     private final class TouchState {
         var key: KeyView
         var mode: TouchMode = .normal
         var committed = false
+        let startX: CGFloat
         var lastX: CGFloat
         var longPress: Timer?
         var repeatTimer: Timer?
@@ -38,6 +41,7 @@ final class KeysArea: UIView {
 
         init(key: KeyView, x: CGFloat) {
             self.key = key
+            self.startX = x
             self.lastX = x
         }
 
@@ -90,7 +94,7 @@ final class KeysArea: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let keyHeight = rowPitch - 11
+        let keyHeight = rowPitch - 10
         let width = bounds.width - sidePad * 2
         for (r, row) in rows.enumerated() {
             let used = row.keys.reduce(CGFloat(0)) { $0 + $1.width }
@@ -111,7 +115,7 @@ final class KeysArea: UIView {
         var best: KeyView?
         var bestDistance = CGFloat.greatestFiniteMagnitude
         for key in keyViews {
-            let hitFrame = key.frame.insetBy(dx: -hGap / 2, dy: -6)
+            let hitFrame = key.frame.insetBy(dx: -hGap / 2, dy: -5)
             if hitFrame.contains(point) { return key }
             let dx = max(key.frame.minX - point.x, 0, point.x - key.frame.maxX)
             let dy = max(key.frame.minY - point.y, 0, point.y - key.frame.maxY)
@@ -158,7 +162,7 @@ final class KeysArea: UIView {
             state.committed = true
             delegate?.keysArea(perform: .delete)
             state.longPress = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self, weak state] _ in
-                guard let self, let state else { return }
+                guard let self, let state, state.mode == .normal else { return }
                 state.repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.09, repeats: true) { [weak self, weak state] _ in
                     guard let self, let state else { return }
                     state.repeatCount += 1
@@ -170,7 +174,7 @@ final class KeysArea: UIView {
             delegate?.keysArea(perform: .shift)
         case .space:
             state.longPress = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self, weak state] _ in
-                guard let self, let state else { return }
+                guard let self, let state, state.mode == .normal else { return }
                 state.mode = .trackpad
                 state.committed = true
                 self.keyViews.forEach { $0.alpha = 0.35 }
@@ -188,12 +192,13 @@ final class KeysArea: UIView {
 
     private func scheduleAlternates(_ state: TouchState) {
         state.longPress?.invalidate()
-        guard let text = state.key.characterText, !state.key.spec.alternates.isEmpty else { return }
-        state.longPress = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self, weak state] _ in
-            guard let self, let state else { return }
+        guard !state.key.spec.alternates.isEmpty else { return }
+        state.longPress = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self, weak state] _ in
+            guard let self, let state, state.mode == .normal, !state.committed else { return }
             state.mode = .alternates
             self.preview.hide()
-            self.alternates.show(options: [text] + state.key.spec.alternates, over: state.key.frame, in: self.bounds, theme: self.theme)
+            self.delegate?.keysAreaFeedback(.shift)
+            self.alternates.show(options: state.key.spec.alternates, over: state.key.frame, in: self.bounds, theme: self.theme)
             self.bringSubviewToFront(self.alternates)
         }
     }
@@ -205,6 +210,7 @@ final class KeysArea: UIView {
             switch state.mode {
             case .alternates:
                 alternates.select(atX: point.x)
+
             case .trackpad:
                 let step: CGFloat = 9
                 let moved = Int((point.x - state.lastX) / step)
@@ -212,25 +218,54 @@ final class KeysArea: UIView {
                     delegate?.keysAreaMoveCursor(moved)
                     state.lastX += CGFloat(moved) * step
                 }
-            case .normal:
-                guard state.key.isCharacter, !state.committed,
-                      let newKey = keyAt(point), newKey !== state.key, newKey.isCharacter else { continue }
-                state.key.isPressed = false
-                state.key = newKey
-                newKey.isPressed = true
-                if showsPreviews, let text = newKey.characterText {
-                    preview.show(text: text, over: newKey.frame, in: bounds, theme: theme)
-                    bringSubviewToFront(preview)
+
+            case .swipeDelete:
+                let step: CGFloat = 30
+                let moved = Int((state.lastX - point.x) / step)
+                if moved > 0 {
+                    for _ in 0..<moved { delegate?.keysAreaDeleteWord() }
+                    state.lastX -= CGFloat(moved) * step
                 }
-                scheduleAlternates(state)
+
+            case .normal:
+                switch state.key.spec.action {
+                case .space:
+                    // Swipe on space moves the cursor straight away.
+                    if abs(point.x - state.startX) > 12 {
+                        state.longPress?.invalidate()
+                        state.mode = .trackpad
+                        state.committed = true
+                        state.lastX = point.x
+                    }
+                case .delete:
+                    // Swipe left from delete erases whole words.
+                    if state.startX - point.x > 24 {
+                        state.stopTimers()
+                        state.mode = .swipeDelete
+                        state.lastX = point.x
+                        delegate?.keysAreaDeleteWord()
+                    }
+                case .text:
+                    guard !state.committed, let newKey = keyAt(point),
+                          newKey !== state.key, newKey.isCharacter else { continue }
+                    state.key.isPressed = false
+                    state.key = newKey
+                    newKey.isPressed = true
+                    if showsPreviews, let text = newKey.characterText {
+                        preview.show(text: text, over: newKey.frame, in: bounds, theme: theme)
+                        bringSubviewToFront(preview)
+                    }
+                    scheduleAlternates(state)
+                default:
+                    break
+                }
             }
         }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches {
-            let id = ObjectIdentifier(touch)
-            guard let state = states.removeValue(forKey: id) else { continue }
+            guard let state = states.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
             let action = state.key.spec.action
             let mode = state.mode
             let alreadyCommitted = state.committed
@@ -240,7 +275,7 @@ final class KeysArea: UIView {
             switch mode {
             case .alternates:
                 if let chosen { delegate?.keysArea(perform: .text(chosen)) }
-            case .trackpad:
+            case .trackpad, .swipeDelete:
                 break
             case .normal:
                 if !alreadyCommitted { delegate?.keysArea(perform: action) }

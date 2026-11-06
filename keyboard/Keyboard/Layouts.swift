@@ -5,6 +5,7 @@ enum KeyboardMode: Equatable {
     case symbols
     case symbols2
     case emoji
+    case clipboard
 }
 
 enum KeyAction: Equatable {
@@ -20,7 +21,10 @@ enum KeyAction: Equatable {
 struct KeySpec {
     var action: KeyAction
     var width: CGFloat = 1
+    /// Long-press options. The first one is typed if you long-press and let go.
     var alternates: [String] = []
+    /// Small symbol shown in the key's corner (Gboard style).
+    var hint: String? = nil
 }
 
 struct KeyRow {
@@ -49,12 +53,30 @@ enum Layouts {
         "6": "٦", "7": "٧", "8": "٨", "9": "٩", "0": "٠",
     ]
 
+    private static let digitExtras: [String: [String]] = [
+        "1": split("¹ ½ ⅓ ¼ ⅛"),
+        "2": split("² ⅔"),
+        "3": split("³ ¾ ⅜"),
+        "4": split("⁴"),
+        "5": split("⁵ ⅝"),
+        "7": split("⅞"),
+        "0": split("⁰ ∅"),
+    ]
+
     static func numberRow() -> KeyRow {
         let keys = split("1 2 3 4 5 6 7 8 9 0").map { digit -> KeySpec in
-            KeySpec(action: .text(digit), alternates: arabicDigits[digit].map { [$0] } ?? [])
+            let arabic = arabicDigits[digit].map { [$0] } ?? []
+            return KeySpec(action: .text(digit), alternates: arabic + (digitExtras[digit] ?? []))
         }
         return KeyRow(keys: keys)
     }
+
+    /// Gboard's long-press symbols for each letter.
+    private static let englishSymbols: [String: String] = [
+        "q": "%", "w": "^", "e": "~", "r": "|", "t": "[", "y": "]", "u": "<", "i": ">", "o": "{", "p": "}",
+        "a": "@", "s": "#", "d": "&", "f": "*", "g": "-", "h": "+", "j": "=", "k": "(", "l": ")",
+        "z": "_", "x": "$", "c": "\"", "v": "'", "b": ":", "n": ";", "m": "/",
+    ]
 
     // MARK: English letters
 
@@ -75,8 +97,10 @@ enum Layouts {
     private static func englishRow(_ letters: String, shifted: Bool) -> [KeySpec] {
         split(letters).map { lower -> KeySpec in
             let label = shifted ? lower.uppercased() : lower
-            let alts = (englishAlternates[lower] ?? []).map { shifted ? $0.uppercased() : $0 }
-            return KeySpec(action: .text(label), alternates: alts)
+            let accents = (englishAlternates[lower] ?? []).map { shifted ? $0.uppercased() : $0 }
+            let symbol = englishSymbols[lower]
+            let alts = (symbol.map { [$0] } ?? []) + accents
+            return KeySpec(action: .text(label), alternates: alts, hint: symbol)
         }
     }
 
@@ -101,7 +125,7 @@ enum Layouts {
     static func rows(mode: KeyboardMode, shifted: Bool, showGlobe: Bool) -> [KeyRow] {
         var rows: [KeyRow] = [numberRow()]
         switch mode {
-        case .letters, .emoji:
+        case .letters, .emoji, .clipboard:
             if isArabic {
                 rows.append(KeyRow(keys: arabicRow("ض ص ث ق ف غ ع ه خ ح ج")))
                 rows.append(KeyRow(keys: arabicRow("ش س ي ب ل ا ت ن م ك ط")))
